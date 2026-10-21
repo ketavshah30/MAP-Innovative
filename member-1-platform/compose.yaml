@@ -1,0 +1,321 @@
+name: streaming-local
+
+x-auth: &auth
+  JWT_ISSUER: http://localhost:8081/realms/streaming
+  JWT_JWKS_URL: http://keycloak:8080/realms/streaming/protocol/openid-connect/certs
+  JWT_METADATA_URL: http://keycloak:8080/realms/streaming/.well-known/openid-configuration
+  SERVICE_KEY: ${SERVICE_KEY:?Run bootstrap first}
+  PROFILE_URL: http://profile:8011
+  KAFKA_BROKERS: kafka:9092
+
+x-app: &app
+  restart: unless-stopped
+  init: true
+  security_opt: [no-new-privileges:true]
+
+x-mysql: &mysql
+  image: mysql:8.4.4
+  environment: &mysql-env
+    MYSQL_ROOT_PASSWORD: ${DEV_PASSWORD}
+    MYSQL_DATABASE: billing
+    MYSQL_USER: billing
+    MYSQL_PASSWORD: ${DEV_PASSWORD}
+  healthcheck:
+    test: [CMD-SHELL, 'mysqladmin ping -h localhost -u root -p"$$MYSQL_ROOT_PASSWORD" --silent']
+    interval: 10s
+    timeout: 5s
+    retries: 30
+
+x-billing-env: &billing-env
+  <<: *auth
+  RABBIT_URL: amqp://billing:${DEV_PASSWORD}@rabbit:5672/billing
+
+services:
+  frontend:
+    image: node:22.14.0-alpine
+    working_dir: /workspace/member-1-platform
+    command: [node, frontend/server.mjs]
+    environment:
+      PORT: 8090
+      IN_DOCKER: 'true'
+      API_GATEWAY: http://gateway:8000
+      IDENTITY_URL: http://keycloak:8080
+    ports: ['127.0.0.1:8090:8090']
+    volumes:
+      - ./frontend:/workspace/member-1-platform/frontend:ro
+      - ./contracts:/workspace/member-1-platform/contracts:ro
+    restart: unless-stopped
+    init: true
+    security_opt: [no-new-privileges:true]
+    depends_on: [gateway, keycloak]
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1.4
+    command: [start-dev, --import-realm]
+    environment:
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: 'true'
+      KC_BOOTSTRAP_ADMIN_USERNAME: local-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${DEV_PASSWORD}
+      JAVA_OPTS_KC_HEAP: -Xms128m -Xmx512m
+    ports: ['127.0.0.1:8081:8080']
+    volumes:
+      - ../.local/realm.json:/opt/keycloak/data/import/realm.json:ro
+      - keycloak-data:/opt/keycloak/data
+  gateway:
+    image: kong:3.9.0
+    environment:
+      KONG_DATABASE: 'off'
+      KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yaml
+      KONG_ADMIN_LISTEN: 'off'
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+    volumes: ['./gateway/kong.yaml:/etc/kong/kong.yaml:ro']
+    ports: ['127.0.0.1:8080:8000']
+    depends_on: [profile, watchlist, catalog-write, catalog-read, subscription, payment, invoice, playback-session, watch-history, reco-api]
+  mongo:
+    image: mongo:7.0.17
+    command: [mongod, --replSet, rs0, --bind_ip_all]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, 'db.adminCommand({ping:1}).ok']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  mongo-init:
+    image: mongo:7.0.17
+    depends_on:
+      mongo: {condition: service_healthy}
+    entrypoint: [mongosh, --host, mongo:27017, --quiet, --eval]
+    command: ['try { rs.status() } catch(e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]}) }; while(!db.hello().isWritablePrimary) { sleep(500) }']
+  catalog-write-db:
+    image: postgres:16.8-alpine
+    environment: {POSTGRES_DB: catalog, POSTGRES_USER: catalog, POSTGRES_PASSWORD: '${DEV_PASSWORD}'}
+    volumes: [catalog-write-data:/var/lib/postgresql/data]
+    healthcheck: {test: [CMD-SHELL, pg_isready -U catalog -d catalog], interval: 5s, timeout: 5s, retries: 30}
+  catalog-read-db:
+    image: postgres:16.8-alpine
+    environment: {POSTGRES_DB: catalog, POSTGRES_USER: catalog, POSTGRES_PASSWORD: '${DEV_PASSWORD}'}
+    volumes: [catalog-read-data:/var/lib/postgresql/data]
+    healthcheck: {test: [CMD-SHELL, pg_isready -U catalog -d catalog], interval: 5s, timeout: 5s, retries: 30}
+  subscription-db:
+    <<: *mysql
+    volumes: [subscription-data:/var/lib/mysql]
+  payment-db:
+    <<: *mysql
+    volumes: [payment-data:/var/lib/mysql]
+  invoice-db:
+    <<: *mysql
+    volumes: [invoice-data:/var/lib/mysql]
+  redis-session:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --appendonly, 'yes', --appendfsync, always, --maxmemory-policy, noeviction]
+    volumes: [redis-session-data:/data]
+  redis-cache:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --maxmemory, 256mb, --maxmemory-policy, allkeys-lru]
+  cassandra:
+    image: cassandra:5.0.3
+    environment: {MAX_HEAP_SIZE: 512M, HEAP_NEWSIZE: 128M}
+    volumes: [cassandra-data:/var/lib/cassandra]
+    healthcheck: {test: [CMD-SHELL, "cqlsh -e 'DESCRIBE CLUSTER'"], interval: 15s, timeout: 10s, retries: 40, start_period: 60s}
+  neo4j:
+    image: neo4j:5.26.3-community
+    environment:
+      NEO4J_AUTH: neo4j/${DEV_PASSWORD}
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+    volumes: [neo4j-data:/data]
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes: [kafka-data:/var/lib/kafka/data]
+    healthcheck: {test: [CMD-SHELL, '/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list'], interval: 10s, timeout: 10s, retries: 30}
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka: {condition: service_healthy}
+    entrypoint: [/bin/sh, /init/topics.sh]
+    volumes: ['./kafka/topics.sh:/init/topics.sh:ro']
+  rabbit:
+    image: rabbitmq:4.0.7-alpine
+    environment: {RABBITMQ_DEFAULT_USER: billing, RABBITMQ_DEFAULT_PASS: '${DEV_PASSWORD}', RABBITMQ_DEFAULT_VHOST: billing}
+    volumes: [rabbit-data:/var/lib/rabbitmq]
+    healthcheck: {test: [CMD, rabbitmq-diagnostics, -q, ping], interval: 10s, timeout: 10s, retries: 30}
+  profile:
+    <<: *app
+    user: '${LOCAL_UID:-1000}:${LOCAL_GID:-1000}'
+    build: {context: ../member-2-personalization, dockerfile: Dockerfile.node}
+    command: [profile]
+    environment:
+      <<: *auth
+      PORT: 8011
+      MONGO_URL: mongodb://mongo:27017/profile?replicaSet=rs0
+      PCT_JWKS_FILE: /keys/pct-jwks.json
+      PCT_PRIVATE_KEY_FILE: /keys/pct-private.pem
+      DEV_REGION: IN
+    volumes:
+      - ../.local/pct-jwks.json:/keys/pct-jwks.json:ro
+      - ../.local/pct-private.pem:/keys/pct-private.pem:ro
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+      kafka-init: {condition: service_completed_successfully}
+      keycloak: {condition: service_started}
+  watchlist:
+    <<: *app
+    build: {context: ../member-2-personalization, dockerfile: Dockerfile.node}
+    command: [watchlist]
+    environment:
+      <<: *auth
+      PORT: 8012
+      MONGO_URL: mongodb://mongo:27017/watchlist?replicaSet=rs0
+      PCT_JWKS_FILE: /keys/pct-jwks.json
+      CATALOG_URL: http://catalog-read:8022
+    volumes: ['../.local/pct-jwks.json:/keys/pct-jwks.json:ro']
+    depends_on:
+      mongo-init: {condition: service_completed_successfully}
+      kafka-init: {condition: service_completed_successfully}
+  catalog-write:
+    <<: *app
+    build: ../member-3-catalog
+    environment:
+      <<: *auth
+      SERVICE_NAME: catalog-write
+      PORT: 8021
+      DATABASE_URL: jdbc:postgresql://catalog-write-db:5432/catalog
+      DATABASE_USER: catalog
+      DATABASE_PASSWORD: ${DEV_PASSWORD}
+    depends_on:
+      catalog-write-db: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+  catalog-read:
+    <<: *app
+    build: ../member-3-catalog
+    environment:
+      <<: *auth
+      SERVICE_NAME: catalog-read
+      PORT: 8022
+      DATABASE_URL: jdbc:postgresql://catalog-read-db:5432/catalog
+      DATABASE_USER: catalog
+      DATABASE_PASSWORD: ${DEV_PASSWORD}
+    depends_on:
+      catalog-read-db: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+  subscription:
+    <<: *app
+    build: ../member-4-billing
+    environment:
+      <<: *billing-env
+      SERVICE_NAME: subscription
+      PORT: 8031
+      DATABASE_URL: Server=subscription-db;Database=billing;User ID=billing;Password=${DEV_PASSWORD}
+    depends_on:
+      subscription-db: {condition: service_healthy}
+      rabbit: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+  payment:
+    <<: *app
+    build: ../member-4-billing
+    environment:
+      <<: *billing-env
+      SERVICE_NAME: payment
+      PORT: 8032
+      DATABASE_URL: Server=payment-db;Database=billing;User ID=billing;Password=${DEV_PASSWORD}
+    depends_on:
+      payment-db: {condition: service_healthy}
+      rabbit: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+  invoice:
+    <<: *app
+    build: ../member-4-billing
+    environment:
+      <<: *billing-env
+      SERVICE_NAME: invoice
+      PORT: 8033
+      DATABASE_URL: Server=invoice-db;Database=billing;User ID=billing;Password=${DEV_PASSWORD}
+    depends_on:
+      invoice-db: {condition: service_healthy}
+      rabbit: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+  playback-session:
+    <<: *app
+    build: ../member-5-playback
+    environment:
+      <<: *auth
+      SERVICE_NAME: playback-session
+      PORT: 8041
+      REDIS_URL: redis://redis-session:6379
+      SUBSCRIPTION_URL: http://subscription:8031
+      CATALOG_WRITE_URL: http://catalog-write:8021
+      MEDIA_ROOT: /media
+      MEDIA_KEY: ${MEDIA_KEY}
+      PUBLIC_API_URL: http://localhost:8080
+    volumes: ['../.local/media:/media:ro']
+    depends_on:
+      redis-session: {condition: service_started}
+      kafka-init: {condition: service_completed_successfully}
+  watch-history:
+    <<: *app
+    build: ../member-5-playback
+    environment:
+      <<: *auth
+      SERVICE_NAME: watch-history
+      PORT: 8042
+      CASSANDRA_HOSTS: cassandra
+    depends_on:
+      cassandra: {condition: service_healthy}
+      kafka-init: {condition: service_completed_successfully}
+  reco-engine:
+    <<: *app
+    build: {context: ../member-2-personalization, dockerfile: Dockerfile.python}
+    environment:
+      <<: *auth
+      SERVICE_NAME: reco-engine
+      PORT: 8013
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_PASSWORD: ${DEV_PASSWORD}
+      REDIS_URL: redis://redis-cache:6379
+      CATALOG_URL: http://catalog-read:8022
+    depends_on:
+      neo4j: {condition: service_started}
+      kafka-init: {condition: service_completed_successfully}
+  reco-api:
+    <<: *app
+    build: {context: ../member-2-personalization, dockerfile: Dockerfile.python}
+    environment:
+      <<: *auth
+      SERVICE_NAME: reco-api
+      PORT: 8014
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_PASSWORD: ${DEV_PASSWORD}
+      REDIS_URL: redis://redis-cache:6379
+      CATALOG_URL: http://catalog-read:8022
+    depends_on: [neo4j, redis-cache, reco-engine]
+
+volumes:
+  keycloak-data:
+  mongo-data:
+  catalog-write-data:
+  catalog-read-data:
+  subscription-data:
+  payment-data:
+  invoice-data:
+  redis-session-data:
+  cassandra-data:
+  neo4j-data:
+  kafka-data:
+  rabbit-data:

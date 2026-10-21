@@ -1,0 +1,67 @@
+_format_version: '3.0'
+services:
+  - name: profile
+    url: http://profile:8011
+    routes:
+      - name: profiles
+        paths: [/profiles, /accounts]
+        strip_path: false
+  - name: watchlist
+    url: http://watchlist:8012
+    routes:
+      - name: watchlist
+        paths: [/watchlist]
+        strip_path: false
+  - name: catalog-write
+    url: http://catalog-write:8021
+    routes:
+      - name: catalog-admin
+        paths: [/admin/catalog]
+        strip_path: false
+  - name: catalog-read
+    url: http://catalog-read:8022
+    routes:
+      - name: catalog-read
+        paths: [/catalog]
+        strip_path: false
+  - name: subscription
+    url: http://subscription:8031
+    routes:
+      - name: subscription
+        paths: [/plans, /subscriptions]
+        strip_path: false
+  - name: payment
+    url: http://payment:8032
+    routes:
+      - name: payment
+        paths: [/payments]
+        strip_path: false
+  - name: invoice
+    url: http://invoice:8033
+    routes:
+      - name: invoice
+        paths: [/invoices]
+        strip_path: false
+  - name: playback-session
+    url: http://playback-session:8041
+    routes:
+      - name: playback
+        paths: [/sessions, /media]
+        strip_path: false
+  - name: watch-history
+    url: http://watch-history:8042
+    routes:
+      - name: history
+        paths: [/history]
+        strip_path: false
+  - name: reco-api
+    url: http://reco-api:8014
+    routes:
+      - name: recommendations
+        paths: [/recommendations]
+        strip_path: false
+plugins:
+  - name: request-size-limiting
+    config: {allowed_payload_size: 1}
+  - name: rate-limiting
+    config: {minute: 600, policy: local}

@@ -1,0 +1,14 @@
+.local/
+**/node_modules/
+**/dist/
+**/target/
+**/bin/
+**/obj/
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/coverage/
+**/.env
+*.log
+*.pem
+*.key
