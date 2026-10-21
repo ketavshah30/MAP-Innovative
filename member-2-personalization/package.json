@@ -1,0 +1,23 @@
+{
+  "name": "streaming-personalization",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test tests/*.test.ts",
+    "profile": "tsx src/main.ts profile",
+    "watchlist": "tsx src/main.ts watchlist"
+  },
+  "dependencies": {
+    "fastify": "5.2.1",
+    "jose": "5.9.6",
+    "mongodb": "6.13.0",
+    "kafkajs": "2.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.13.4",
+    "typescript": "5.7.3",
+    "tsx": "4.19.3"
+  }
+}
