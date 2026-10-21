@@ -1,6 +1,6 @@
 # Content streaming platform — five-member workspace
 
-> **Staged upload:** This repository currently contains shared project files and Member 1's folder. Members 2–5 will add their folders separately. The complete Compose stack and full workspace checks are unavailable until those folders are present.
+> **Staged upload:** This repository currently contains shared project files and the folders for Members 1, 4 and 5. Members 2 and 3 will add their folders separately. The complete Compose stack and full workspace checks are unavailable until those folders are present.
 
 Eleven backend service build targets are divided among five owners. This checkout targets **local Docker development with a payment sandbox**. Read [implementation status](IMPLEMENTATION_STATUS.md) before using it outside a developer machine.
 
@@ -9,7 +9,7 @@ Eleven backend service build targets are divided among five owners. This checkou
 | Member 1 | [member-1-platform](member-1-platform/README.md) | Compose, contracts, integration checks, identity and shared infrastructure |
 | Member 2 | `member-2-personalization` (pending upload) | Node/TypeScript Profile + Watchlist; Python Recommendation Engine + API |
 | Member 3 | `member-3-catalog` (pending upload) | Java Catalog Write + Read |
-| Member 4 | `member-4-billing` (pending upload) | C# Subscription + Payment + Invoice |
+| Member 4 | [member-4-billing](member-4-billing/README.md) | C# Subscription + Payment + Invoice |
 | Member 5 | `member-5-playback` (pending upload) | Go Playback Session + Watch History |
 
 ## Local startup
