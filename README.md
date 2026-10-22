@@ -1,16 +1,14 @@
 # Content streaming platform — five-member workspace
 
-> **Staged upload:** This repository currently contains shared project files and the folders for Members 1, 2, 3 and 4. Member 5 will add their folder separately. The complete Compose stack and full workspace checks are unavailable until that folder is present.
-
 Eleven backend service build targets are divided among five owners. This checkout targets **local Docker development with a payment sandbox**. Read [implementation status](IMPLEMENTATION_STATUS.md) before using it outside a developer machine.
 
 | Owner | Folder | Work |
 |---|---|---|
 | Member 1 | [member-1-platform](member-1-platform/README.md) | Compose, contracts, integration checks, identity and shared infrastructure |
-| Member 2 | `member-2-personalization` (pending upload) | Node/TypeScript Profile + Watchlist; Python Recommendation Engine + API |
+| Member 2 | [member-2-personalization](member-2-personalization/README.md) | Node/TypeScript Profile + Watchlist; Python Recommendation Engine + API |
 | Member 3 | [member-3-catalog](member-3-catalog/README.md) | Java Catalog Write + Read |
 | Member 4 | [member-4-billing](member-4-billing/README.md) | C# Subscription + Payment + Invoice |
-| Member 5 | `member-5-playback` (pending upload) | Go Playback Session + Watch History |
+| Member 5 | [member-5-playback](member-5-playback/README.md) | Go Playback Session + Watch History |
 
 ## Local startup
 
@@ -89,7 +87,7 @@ If the explicit resolver works, back up the existing Docker Engine JSON configur
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). Each member changes only their own folder. Member 1 merges shared-contract and Compose changes. Independent lockfiles, Dockerfiles and migrations prevent routine edits from touching the same files.
 
-This folder is currently inside a larger Git repository. From this folder, stage only the intended paths, for example `git add member-3-catalog`. Do not run `git add ..` or copy another member's complete checkout over your own. GitHub automation must live at the actual repository root; see the installation instructions in Member 1's folder.
+This is the repository root. Stage only the files for your change, and avoid copying another member's complete checkout over the shared repository. GitHub automation must live at the repository root; see the installation instructions in Member 1's folder.
 
 ## Specification
 
@@ -98,3 +96,213 @@ This folder is currently inside a larger Git repository. From this folder, stage
 - [Current implementation and remaining work](IMPLEMENTATION_STATUS.md)
 
 The original plan's production gates, provider integrations and distributed durability guarantees are separate from the local demonstration.
+
+## Architecture Diagram
+
+This document describes the current local-development architecture of the streaming and recommendation platform. It shows the main service boundaries, storage ownership, and event flows; it is not a diagram of planned production infrastructure.
+
+### Application Architecture
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+~~~mermaid
+flowchart TD
+    subgraph UserLayer["Client"]
+        Browser["Browser"]
+    end
+    subgraph EntryLayer["Entry and Identity"]
+        Frontend["Streaming UI and proxy"]
+        Gateway["Kong gateway"]
+        Identity["Keycloak"]
+    end
+    subgraph DomainLayer["Application Domains"]
+        Personalization["Profiles, watchlist, recommendations"]
+        Catalog["Catalog write and read"]
+        Billing["Subscription, payment, invoice"]
+        Playback["Playback and watch history"]
+    end
+    subgraph DataLayer["Data by Domain"]
+        ProfileData[("MongoDB profile and watchlist")]
+        CatalogData[("PostgreSQL catalog")]
+        BillingData[("MySQL billing")]
+        RecommendationData[("Neo4j and Redis recommendations")]
+        PlaybackData[("Redis sessions and Cassandra history")]
+        MediaData[("Local HLS media")]
+    end
+    subgraph BrokerLayer["Messaging"]
+        Kafka["Kafka events"]
+        Rabbit["RabbitMQ billing commands"]
+    end
+
+    Browser -->|"uses"| Frontend
+    Frontend -->|"sign in"| Identity
+    Frontend -->|"API requests"| Gateway
+    Gateway --> Personalization
+    Gateway --> Catalog
+    Gateway --> Billing
+    Gateway --> Playback
+    Personalization -->|"profile and list data"| ProfileData
+    Personalization -->|"ranking signals"| RecommendationData
+    Catalog -->|"title metadata"| CatalogData
+    Billing -->|"billing records"| BillingData
+    Playback -->|"session and history data"| PlaybackData
+    Playback -->|"streams files"| MediaData
+    Catalog -->|"title events"| Kafka
+    Playback -->|"viewing events"| Kafka
+    Kafka -->|"updates ranking"| Personalization
+    Billing -->|"billing workflow"| Rabbit
+~~~
+
+#### Technology Stack Summary
+
+| Layer | Technology | Version | Purpose |
+|---|---|---|---|
+| Web UI and local proxy | JavaScript on Node.js | Node 22.14.0 image | Serves the streaming UI and forwards documented API requests |
+| API entry | Kong | 3.9.0 image | Routes public API paths to private services |
+| Identity | Keycloak | 26.1.4 image | Local login and role-based access tokens |
+| Profile and watchlist | TypeScript, Fastify, MongoDB | Node 22; Fastify 5.2.1; MongoDB 7.0.17 | Accounts, profiles, profile policy, and saved titles |
+| Recommendations | Python, FastAPI, Neo4j, Redis | FastAPI 0.115.8; Neo4j 5.26.3; Redis 7.4.2 | Ranking, graph-based viewing signals, and short-lived fallback snapshots |
+| Catalog | Java 21, Spring Boot, PostgreSQL | Spring Boot 3.4.3; PostgreSQL 16.8 | Admin-managed title metadata and browse/search projection |
+| Billing | C#, ASP.NET Core, MySQL | .NET 8; MySQL 8.4.4 | Subscriptions, simulated payments, and invoices |
+| Playback and history | Go, Redis, Cassandra | Go 1.23; Redis 7.4.2; Cassandra 5.0.3 | Session admission and state, playback progress, and viewing history |
+| Event transport | Apache Kafka | 3.9.0 image | Catalog, profile, playback, history, and billing events |
+| Billing command transport | RabbitMQ | 4.0.7 image | Asynchronous payment commands and results |
+| Media delivery | Local HLS files through Playback | Local development | Signed manifest and segment delivery; no production CDN |
+
+Versions above describe the local Compose image tags or direct application dependencies inspected for this diagram. They are not a production support or security certification.
+
+#### Data Storage & External Services
+
+Each service owns its data and accesses it through its own database: Profile and Watchlist use separate MongoDB databases; Catalog Write and Catalog Read use separate PostgreSQL databases; Subscription, Payment, and Invoice use separate MySQL databases; Playback uses Redis for session state; Watch History uses Cassandra; and Recommendations uses Neo4j with Redis for cached snapshots. Kafka carries asynchronous domain events and RabbitMQ carries billing workflow commands. Keycloak provides local identity. HLS media is currently read from a local media directory mounted into Playback. Admin catalog publishing stores metadata and an asset path, not the video upload itself.
+
+#### Key Architectural Decisions
+
+- Services are divided by domain and own their persistence; other services communicate through HTTP contracts or brokered events rather than directly accessing another service's database.
+- Catalog Write publishes changes through an outbox; Catalog Read and Recommendations consume catalog events, while viewing-history events influence ranking.
+- This checkout targets local development. The payment provider is simulated, media uses local files and signed URLs, and production CDN, DRM, HA, and workload identity are not implemented.
+
+### Component Relationships
+
+The overview above groups services by domain so the main platform boundaries are visible at a glance. These focused diagrams show the internal service and storage relationships. Arrows represent the current local implementation, not planned production integrations.
+
+#### Catalog and Recommendations
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+~~~mermaid
+flowchart LR
+    subgraph ccatServices["Catalog and Personalization"]
+        ccatWrite["Catalog Write"]
+        ccatRead["Catalog Read"]
+        ccatProfile["Profile"]
+        ccatRecoAPI["Recommendation API"]
+        ccatEngine["Recommendation engine"]
+    end
+    subgraph ccatStores["Owned Stores"]
+        ccatPostgresWrite[("PostgreSQL write")]
+        ccatPostgresRead[("PostgreSQL read")]
+        ccatMongo[("MongoDB profile")]
+        ccatNeo4j[("Neo4j graph")]
+        ccatRedis[("Redis cache")]
+    end
+    ccatKafka["Kafka"]
+
+    ccatWrite -->|"metadata and outbox"| ccatPostgresWrite
+    ccatWrite -->|"title events"| ccatKafka
+    ccatKafka -->|"projection events"| ccatRead
+    ccatRead -->|"reads projection"| ccatPostgresRead
+    ccatProfile -->|"profile data"| ccatMongo
+    ccatProfile -->|"lifecycle events"| ccatKafka
+    ccatKafka -->|"catalog and watch events"| ccatEngine
+    ccatEngine -->|"updates viewing graph"| ccatNeo4j
+    ccatEngine -->|"publishes snapshot"| ccatRedis
+    ccatRecoAPI -->|"reads ranking signals"| ccatNeo4j
+    ccatRecoAPI -->|"fallback snapshot"| ccatRedis
+    ccatRecoAPI -->|"filters eligible titles"| ccatRead
+    ccatRecoAPI -->|"validates profile"| ccatProfile
+~~~
+
+#### Billing
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+~~~mermaid
+flowchart LR
+    subgraph cbillServices["Billing Services"]
+        cbillSubscription["Subscription"]
+        cbillPayment["Payment"]
+        cbillInvoice["Invoice"]
+    end
+    subgraph cbillStores["Owned Stores"]
+        cbillMysqlSubscription[("MySQL subscription")]
+        cbillMysqlPayment[("MySQL payment")]
+        cbillMysqlInvoice[("MySQL invoice")]
+    end
+    cbillRabbit["RabbitMQ"]
+    cbillKafka["Kafka"]
+
+    cbillSubscription -->|"stores membership"| cbillMysqlSubscription
+    cbillPayment -->|"stores payment state"| cbillMysqlPayment
+    cbillInvoice -->|"stores invoice records"| cbillMysqlInvoice
+    cbillSubscription -->|"payment command"| cbillRabbit
+    cbillRabbit -->|"command"| cbillPayment
+    cbillPayment -->|"payment result"| cbillRabbit
+    cbillRabbit -->|"result"| cbillSubscription
+    cbillPayment -->|"billing events"| cbillKafka
+~~~
+
+#### Playback and Watch History
+
+<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+~~~mermaid
+flowchart LR
+    subgraph cplayServices["Playback Services"]
+        cplayProfile["Profile"]
+        cplayCatalog["Catalog Write"]
+        cplaySubscription["Subscription"]
+        cplayPlayback["Playback Session"]
+        cplayHistory["Watch History"]
+    end
+    subgraph cplayStores["Owned Stores and Media"]
+        cplayRedis[("Redis sessions")]
+        cplayCassandra[("Cassandra history")]
+        cplayMedia[("Local HLS files")]
+    end
+    cplayKafka["Kafka"]
+
+    cplayPlayback -->|"validates profile"| cplayProfile
+    cplayPlayback -->|"checks rights"| cplayCatalog
+    cplayPlayback -->|"checks entitlement"| cplaySubscription
+    cplayPlayback -->|"stores sessions"| cplayRedis
+    cplayPlayback -->|"serves signed media"| cplayMedia
+    cplayPlayback -->|"session events"| cplayKafka
+    cplayKafka -->|"ended sessions"| cplayHistory
+    cplayHistory -->|"stores history and progress"| cplayCassandra
+    cplayHistory -->|"publishes viewing signals"| cplayKafka
+~~~
+
+#### Component Inventory
+
+| Component | Layer | Type | Responsibility |
+|---|---|---|---|
+| Browser UI | Presentation | Web application | Profile selection, discovery, watchlist, playback controls, and account views |
+| Node UI and API proxy | Presentation | Node.js development server | Serves static UI files and proxies documented requests to Kong |
+| Kong gateway | Entry | API gateway | Routes public HTTP paths to service containers |
+| Keycloak | Identity | Identity provider | Issues local account access tokens and admin role claims |
+| Profile | Domain service | Fastify API | Account/profile lifecycle, profile policy tokens, and profile context |
+| Watchlist | Domain service | Fastify API | Adds, lists, and removes profile-owned title references |
+| Recommendation API | Domain service | FastAPI API | Ranks title IDs and returns currently eligible catalog titles |
+| Recommendation engine | Domain service | Kafka consumer and job API | Ingests title, lifecycle, and viewing events into Neo4j |
+| Catalog Write | Domain service | Spring Boot API | Validates admin catalog changes and writes title metadata plus outbox events |
+| Catalog Read | Domain service | Spring Boot API and event consumer | Builds the read projection and serves browse, search, and eligibility checks |
+| Subscription | Domain service | ASP.NET Core API and queue consumer | Manages plan membership and entitlement state |
+| Payment | Domain service | ASP.NET Core API and queue consumer | Runs local simulated payment operations and emits results |
+| Invoice | Domain service | ASP.NET Core API and queue consumer | Stores invoice records and produces local sandbox PDFs |
+| Playback Session | Domain service | Go API and worker | Validates entitlement and rights, maintains sessions, and serves signed HLS media |
+| Watch History | Domain service | Go API and Kafka consumer | Persists history/progress and publishes viewing signals |
+| MongoDB profile | Data | Document database | Stores account and profile documents |
+| MongoDB watchlist | Data | Document database | Stores saved-title entries |
+| PostgreSQL write and read | Data | Relational databases | Stores authoritative catalog metadata/outbox and the separate read projection |
+| MySQL billing stores | Data | Relational databases | Isolated subscription, payment, and invoice records |
+| Neo4j and Redis cache | Data | Graph database and cache | Stores recommendation relationships and recent fallback snapshots |
+| Redis sessions | Data | Key-value store | Tracks active playback state and concurrent stream slots |
+| Cassandra history | Data | Wide-column database | Stores viewing events, continue-watching progress, and suppression state |
+| Kafka and RabbitMQ | Messaging | Event broker and command queue | Distributes domain events and billing workflow messages |
+| Local HLS files | Media | Mounted filesystem | Supplies manifests and segments to the local Playback service |
